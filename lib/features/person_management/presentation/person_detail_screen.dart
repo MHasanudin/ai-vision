@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:ai_vision/features/person_management/data/person_providers.dart';
 
 class PersonDetailScreen extends ConsumerWidget {
@@ -105,9 +106,20 @@ class PersonDetailScreen extends ConsumerWidget {
                   children: [
                     Padding(
                       padding: const EdgeInsets.all(16),
-                      child: Text(
-                        'Face Embeddings',
-                        style: Theme.of(context).textTheme.titleMedium,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Face Embeddings',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: () => context.go('/persons/${person.id}/capture'),
+                            icon: const Icon(Icons.add_a_photo, size: 18),
+                            label: const Text('Capture'),
+                          ),
+                        ],
                       ),
                     ),
                     embeddingsAsync.when(
@@ -125,7 +137,7 @@ class PersonDetailScreen extends ConsumerWidget {
                             padding: EdgeInsets.all(16),
                             child: Text(
                               'No face embeddings captured yet.\n'
-                              'Use the Face Recognition mode to capture and register this person\'s face.',
+                              'Tap "Capture" to register this person\'s face.',
                             ),
                           );
                         }

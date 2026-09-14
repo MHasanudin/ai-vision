@@ -772,9 +772,15 @@ class FaceDetectionEngine extends DetectionEngine {
 class FaceRecognitionEngine extends DetectionEngine {
   Interpreter? _interpreter;
   bool _isInitialized = false;
-  
-  // Face database for recognition (in production, use proper database)
+
+  static const int _inputSize = 112;
+  static const int _embeddingSize = 192;
+
+  // Face database for recognition (personId -> embedding)
   final Map<String, List<double>> _faceDatabase = {};
+
+  // Face detector used to locate faces before embedding
+  final FaceDetectionEngine _faceDetector = FaceDetectionEngine();
 
   @override
   bool get isInitialized => _isInitialized;
@@ -782,14 +788,75 @@ class FaceRecognitionEngine extends DetectionEngine {
   @override
   Future<void> initialize() async {
     if (_isInitialized) return;
-    
+
     try {
       _interpreter = await Interpreter.fromAsset('assets/models/mobilefacenet.tflite');
+      await _faceDetector.initialize();
       _isInitialized = true;
+      debugPrint('FaceRecognitionEngine: Model loaded successfully');
     } catch (e) {
       _isInitialized = false;
       debugPrint('FaceRecognitionEngine: Model not found, using mock mode: $e');
     }
+  }
+
+  /// Extract a 192-dim embedding from RGB image data.
+  /// Returns null if the model is not initialized or inference fails.
+  Future<List<double>?> extractEmbedding(
+    Uint8List rgbData, {
+    int? width,
+    int? height,
+  }) async {
+    if (!_isInitialized || _interpreter == null) return null;
+
+    try {
+      final srcW = width ?? _inputSize;
+      final srcH = height ?? _inputSize;
+
+      // Preprocess: resize to 112x112, normalize to [-1, 1]
+      final input = _preprocessImage(rgbData, srcW, srcH);
+
+      // Output: [1, 192] embedding (ByteBuffer preserves tensor shape)
+      final output = Float32List(_embeddingSize).buffer;
+
+      _interpreter!.runForMultipleInputs([input.buffer], {0: output});
+
+      return output.asFloat32List().toList();
+    } catch (e) {
+      debugPrint('FaceRecognitionEngine extractEmbedding error: $e');
+      return null;
+    }
+  }
+
+  /// Extract an embedding from a face crop region of a full frame.
+  /// [faceRect] is normalized (0-1) relative to the frame.
+  Future<List<double>?> extractEmbeddingFromCrop(
+    Uint8List rgbData, {
+    required Rect faceRect,
+    required int frameWidth,
+    required int frameHeight,
+  }) async {
+    // Convert normalized rect to pixel coordinates
+    final x1 = (faceRect.left * frameWidth).round().clamp(0, frameWidth - 1);
+    final y1 = (faceRect.top * frameHeight).round().clamp(0, frameHeight - 1);
+    final x2 = (faceRect.right * frameWidth).round().clamp(x1 + 1, frameWidth);
+    final y2 = (faceRect.bottom * frameHeight).round().clamp(y1 + 1, frameHeight);
+
+    final cropW = x2 - x1;
+    final cropH = y2 - y1;
+    if (cropW <= 0 || cropH <= 0) return null;
+
+    // Crop the face region (RGB interleaved)
+    final crop = Uint8List(cropW * cropH * 3);
+    for (int y = 0; y < cropH; y++) {
+      final srcRow = (y1 + y) * frameWidth * 3;
+      final dstRow = y * cropW * 3;
+      for (int x = 0; x < cropW * 3; x++) {
+        crop[dstRow + x] = rgbData[srcRow + x1 * 3 + x];
+      }
+    }
+
+    return extractEmbedding(crop, width: cropW, height: cropH);
   }
 
   @override
@@ -799,23 +866,80 @@ class FaceRecognitionEngine extends DetectionEngine {
     }
 
     try {
-      // TODO: Implement actual face recognition
-      // 1. Detect face (use FaceDetectionEngine)
-      // 2. Align and crop face to 112x112
-      // 3. Generate embedding
-      // 4. Compare with database using cosine similarity
-      return _getMockResult();
+      final srcW = width ?? _inputSize;
+      final srcH = height ?? _inputSize;
+
+      // 1. Detect faces
+      final faceResult = await _faceDetector.detect(imageData, width: srcW, height: srcH);
+      final faces = faceResult.boxes;
+      if (faces.isEmpty) {
+        return FaceRecognitionResult(
+          personName: 'Unknown',
+          dateOfBirth: '',
+          personId: '',
+          similarity: 0,
+          faceRect: Rect.zero,
+        );
+      }
+
+      // 2. Take the largest face
+      final largest = faces.reduce((a, b) {
+        final areaA = a.rect.width * a.rect.height;
+        final areaB = b.rect.width * b.rect.height;
+        return areaA >= areaB ? a : b;
+      });
+
+      // 3. Extract embedding from the face crop
+      final embedding = await extractEmbeddingFromCrop(
+        imageData,
+        faceRect: largest.rect,
+        frameWidth: srcW,
+        frameHeight: srcH,
+      );
+
+      if (embedding == null) {
+        return FaceRecognitionResult(
+          personName: 'Unknown',
+          dateOfBirth: '',
+          personId: '',
+          similarity: 0,
+          faceRect: largest.rect,
+        );
+      }
+
+      // 4. Find best match in database
+      final match = findBestMatch(embedding, 0.4);
+      if (match == null) {
+        return FaceRecognitionResult(
+          personName: 'Unknown',
+          dateOfBirth: '',
+          personId: '',
+          similarity: 0,
+          faceRect: largest.rect,
+        );
+      }
+
+      return FaceRecognitionResult(
+        personName: match,
+        dateOfBirth: '',
+        personId: '',
+        similarity: _lastSimilarity,
+        faceRect: largest.rect,
+      );
     } catch (e) {
       debugPrint('FaceRecognitionEngine error: $e');
       return _getMockResult();
     }
   }
 
+  double _lastSimilarity = 0;
+
   @override
   Future<void> dispose() async {
     _interpreter?.close();
     _interpreter = null;
     _isInitialized = false;
+    await _faceDetector.dispose();
   }
 
   // Add face to database
@@ -823,11 +947,16 @@ class FaceRecognitionEngine extends DetectionEngine {
     _faceDatabase[personId] = embedding;
   }
 
+  // Clear the in-memory database
+  void clearDatabase() {
+    _faceDatabase.clear();
+  }
+
   // Find best match
   String? findBestMatch(List<double> embedding, double threshold) {
     String? bestMatch;
     double bestSimilarity = 0;
-    
+
     for (final entry in _faceDatabase.entries) {
       final similarity = _cosineSimilarity(embedding, entry.value);
       if (similarity > bestSimilarity && similarity >= threshold) {
@@ -835,22 +964,72 @@ class FaceRecognitionEngine extends DetectionEngine {
         bestMatch = entry.key;
       }
     }
-    
+
+    _lastSimilarity = bestSimilarity;
     return bestMatch;
   }
 
+  /// Find the best matching person from a list of candidates loaded from the
+  /// database. Returns the personId and similarity, or null if none pass [threshold].
+  (String personId, double similarity)? findBestMatchIn(
+    List<double> embedding,
+    List<MapEntry<String, List<double>>> candidates,
+    double threshold,
+  ) {
+    String? bestId;
+    double bestSimilarity = 0;
+
+    for (final candidate in candidates) {
+      final similarity = _cosineSimilarity(embedding, candidate.value);
+      if (similarity > bestSimilarity && similarity >= threshold) {
+        bestSimilarity = similarity;
+        bestId = candidate.key;
+      }
+    }
+
+    _lastSimilarity = bestSimilarity;
+    if (bestId == null) return null;
+    return (bestId, bestSimilarity);
+  }
+
+  /// Public cosine similarity (used by screens for matching).
+  double cosineSimilarity(List<double> a, List<double> b) => _cosineSimilarity(a, b);
+
   double _cosineSimilarity(List<double> a, List<double> b) {
     if (a.length != b.length) return 0;
-    
+
     double dot = 0, normA = 0, normB = 0;
     for (int i = 0; i < a.length; i++) {
       dot += a[i] * b[i];
       normA += a[i] * a[i];
       normB += b[i] * b[i];
     }
-    
+
     if (normA == 0 || normB == 0) return 0;
     return dot / (math.sqrt(normA) * math.sqrt(normB));
+  }
+
+  /// Resize and normalize RGB image data to [1, 112, 112, 3] float32 in [-1, 1]
+  Float32List _preprocessImage(Uint8List rgbData, int srcWidth, int srcHeight) {
+    final input = Float32List(1 * _inputSize * _inputSize * 3);
+    final scaleX = srcWidth / _inputSize;
+    final scaleY = srcHeight / _inputSize;
+
+    for (int y = 0; y < _inputSize; y++) {
+      final srcY = (y * scaleY).round().clamp(0, srcHeight - 1);
+      for (int x = 0; x < _inputSize; x++) {
+        final srcX = (x * scaleX).round().clamp(0, srcWidth - 1);
+        final srcIdx = (srcY * srcWidth + srcX) * 3;
+        final dstIdx = (y * _inputSize + x) * 3;
+
+        if (srcIdx + 2 < rgbData.length && dstIdx + 2 < input.length) {
+          input[dstIdx] = (rgbData[srcIdx] - 127.5) / 127.5;         // R
+          input[dstIdx + 1] = (rgbData[srcIdx + 1] - 127.5) / 127.5; // G
+          input[dstIdx + 2] = (rgbData[srcIdx + 2] - 127.5) / 127.5; // B
+        }
+      }
+    }
+    return input;
   }
 
   FaceRecognitionResult _getMockResult() {

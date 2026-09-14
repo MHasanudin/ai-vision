@@ -10,6 +10,7 @@ import 'package:ai_vision/features/settings/presentation/settings_screen.dart';
 import 'package:ai_vision/features/person_management/presentation/person_list_screen.dart';
 import 'package:ai_vision/features/person_management/presentation/person_registration_screen.dart';
 import 'package:ai_vision/features/person_management/presentation/person_detail_screen.dart';
+import 'package:ai_vision/features/person_management/presentation/face_capture_screen.dart';
 
 void main() {
   runApp(const ProviderScope(child: MyApp()));
@@ -106,6 +107,12 @@ class _MyAppState extends ConsumerState<MyApp> {
         GoRoute(
           path: '/persons/:id',
           builder: (context, state) => PersonDetailScreen(
+            personId: int.parse(state.pathParameters['id']!),
+          ),
+        ),
+        GoRoute(
+          path: '/persons/:id/capture',
+          builder: (context, state) => FaceCaptureScreen(
             personId: int.parse(state.pathParameters['id']!),
           ),
         ),

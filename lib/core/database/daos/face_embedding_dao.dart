@@ -14,7 +14,7 @@ class FaceEmbeddingDao extends DatabaseAccessor<AppDatabase> with _$FaceEmbeddin
 
   Future<FaceEmbedding> getFaceEmbeddingById(int id) => (select(faceEmbeddings)..where((f) => f.id.equals(id))).getSingle();
 
-  Future<int> insertFaceEmbedding(FaceEmbedding embedding) => into(faceEmbeddings).insert(embedding);
+  Future<int> insertFaceEmbedding(Insertable<FaceEmbedding> embedding) => into(faceEmbeddings).insert(embedding);
 
   Future<bool> updateFaceEmbedding(FaceEmbedding embedding) => update(faceEmbeddings).replace(embedding);
 
