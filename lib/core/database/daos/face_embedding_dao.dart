@@ -25,4 +25,6 @@ class FaceEmbeddingDao extends DatabaseAccessor<AppDatabase> with _$FaceEmbeddin
   // Get embeddings for a specific person
   Future<List<FaceEmbedding>> getEmbeddingsByPersonId(int personId) =>
       (select(faceEmbeddings)..where((f) => f.personId.equals(personId))).get();
+
+  Future<int> deleteAllFaceEmbeddings() => delete(faceEmbeddings).go();
 }

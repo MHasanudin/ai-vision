@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:camera/camera.dart';
 import 'package:ai_vision/core/camera/camera_preview_widget.dart';
 import 'package:ai_vision/core/camera/camera_providers.dart';
 import 'package:ai_vision/core/ml/detection_engine.dart';
@@ -29,8 +31,25 @@ class _ObjectDetectionScreenState extends ConsumerState<ObjectDetectionScreen> {
   Future<void> _initializeCamera() async {
     try {
       final cameraService = ref.read(cameraServiceProvider);
-      await cameraService.initialize();
-      
+      // Use the default camera selected in settings
+      final defaultCamera = ref.read(defaultCameraProvider);
+      final cameraIndex = await cameraService.getCameraIndex(
+        defaultCamera == 'front'
+            ? CameraLensDirection.front
+            : CameraLensDirection.back,
+      );
+      await cameraService.initialize(cameraIndex: cameraIndex);
+
+      // Apply frame skip interval from settings (Inference FPS)
+      final inferenceFps = ref.read(inferenceFpsProvider);
+      cameraService.setFrameSkipInterval((30 / inferenceFps).round().clamp(1, 10));
+
+      // Initialize the object detection engine (loads TFLite model)
+      final engine = ref.read(objectDetectionEngineProvider);
+      // Apply confidence threshold from settings
+      engine.confidenceThreshold = ref.read(objectConfidenceThresholdProvider);
+      await engine.initialize();
+
       if (mounted) {
         setState(() {
           _isCameraReady = true;
@@ -101,6 +120,11 @@ class _ObjectDetectionScreenState extends ConsumerState<ObjectDetectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+          tooltip: 'Back to Dashboard',
+        ),
         title: const Text('Object Detection'),
         actions: [
           IconButton(
@@ -147,6 +171,7 @@ class _ObjectDetectionScreenState extends ConsumerState<ObjectDetectionScreen> {
             children: [
               CameraPreviewWidget(
                 cameraService: cameraService,
+                mirrorFrontCamera: ref.watch(mirrorFrontCameraProvider),
                 child: _buildDetectionOverlay(),
               ),
               // FPS indicator

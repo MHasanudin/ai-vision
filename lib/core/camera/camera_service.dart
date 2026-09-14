@@ -28,6 +28,16 @@ class CameraService {
     return _cameras;
   }
 
+  /// Returns the index of the first camera matching [lensDirection],
+  /// or 0 if none is found.
+  Future<int> getCameraIndex(CameraLensDirection lensDirection) async {
+    final cameras = await getAvailableCameras();
+    for (int i = 0; i < cameras.length; i++) {
+      if (cameras[i].lensDirection == lensDirection) return i;
+    }
+    return 0;
+  }
+
   // Initialize camera
   Future<void> initialize({
     int cameraIndex = 0,

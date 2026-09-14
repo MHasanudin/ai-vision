@@ -111,7 +111,10 @@ class _MyAppState extends ConsumerState<MyApp> {
         ),
         GoRoute(
           path: '/settings',
-          builder: (context, state) => SettingsScreen(onThemeChanged: _toggleTheme),
+          builder: (context, state) => SettingsScreen(
+            onThemeChanged: _toggleTheme,
+            isDarkMode: _themeMode == ThemeMode.dark,
+          ),
         ),
       ],
     );

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:camera/camera.dart';
 import 'package:ai_vision/core/camera/camera_preview_widget.dart';
 import 'package:ai_vision/core/camera/camera_providers.dart';
 import 'package:ai_vision/core/ml/detection_engine.dart';
@@ -31,8 +33,23 @@ class _HandDetectionScreenState extends ConsumerState<HandDetectionScreen> {
   Future<void> _initializeCamera() async {
     try {
       final cameraService = ref.read(cameraServiceProvider);
-      await cameraService.initialize();
-      
+      // Use the default camera selected in settings
+      final defaultCamera = ref.read(defaultCameraProvider);
+      final cameraIndex = await cameraService.getCameraIndex(
+        defaultCamera == 'front'
+            ? CameraLensDirection.front
+            : CameraLensDirection.back,
+      );
+      await cameraService.initialize(cameraIndex: cameraIndex);
+
+      // Apply frame skip interval from settings (Inference FPS)
+      final inferenceFps = ref.read(inferenceFpsProvider);
+      cameraService.setFrameSkipInterval((30 / inferenceFps).round().clamp(1, 10));
+
+      // Initialize the hand detection engine (loads TFLite model)
+      final engine = ref.read(handDetectionEngineProvider);
+      await engine.initialize();
+
       if (mounted) {
         setState(() {
           _isCameraReady = true;
@@ -96,6 +113,11 @@ class _HandDetectionScreenState extends ConsumerState<HandDetectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.go('/'),
+          tooltip: 'Back to Dashboard',
+        ),
         title: const Text('Hand Detection'),
         actions: [
           IconButton(
@@ -141,6 +163,7 @@ class _HandDetectionScreenState extends ConsumerState<HandDetectionScreen> {
             children: [
               CameraPreviewWidget(
                 cameraService: cameraService,
+                mirrorFrontCamera: ref.watch(mirrorFrontCameraProvider),
                 child: _buildHandOverlay(),
               ),
               Positioned(

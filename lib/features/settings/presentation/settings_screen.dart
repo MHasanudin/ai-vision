@@ -1,13 +1,29 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:ai_vision/core/camera/camera_providers.dart';
+import 'package:ai_vision/core/ml/ml_providers.dart';
+import 'package:ai_vision/features/person_management/data/person_providers.dart';
 
 class SettingsScreen extends ConsumerWidget {
   final void Function(bool) onThemeChanged;
+  final bool isDarkMode;
 
-  const SettingsScreen({super.key, required this.onThemeChanged});
+  const SettingsScreen({
+    super.key,
+    required this.onThemeChanged,
+    required this.isDarkMode,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Watch settings values so the UI reflects provider state
+    final objectThreshold = ref.watch(objectConfidenceThresholdProvider);
+    final faceRecognitionThreshold = ref.watch(faceRecognitionThresholdProvider);
+    final inferenceFps = ref.watch(inferenceFpsProvider);
+    final mirrorFrontCamera = ref.watch(mirrorFrontCameraProvider);
+    final defaultCamera = ref.watch(defaultCameraProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
@@ -26,31 +42,37 @@ class SettingsScreen extends ConsumerWidget {
             context,
             title: 'Object Confidence Threshold',
             subtitle: 'Minimum confidence to show detection',
-            value: 0.5,
+            value: objectThreshold,
             min: 0.1,
             max: 1.0,
             divisions: 9,
-            onChanged: (value) {},
+            onChanged: (value) {
+              ref.read(objectConfidenceThresholdProvider.notifier).state = value;
+            },
           ),
           _buildSliderTile(
             context,
             title: 'Face Recognition Threshold',
             subtitle: 'Minimum similarity for face match',
-            value: 0.7,
+            value: faceRecognitionThreshold,
             min: 0.5,
             max: 1.0,
             divisions: 5,
-            onChanged: (value) {},
+            onChanged: (value) {
+              ref.read(faceRecognitionThresholdProvider.notifier).state = value;
+            },
           ),
           _buildSliderTile(
             context,
             title: 'Inference FPS',
             subtitle: 'Target inference frames per second',
-            value: 15,
+            value: inferenceFps.toDouble(),
             min: 5,
             max: 30,
             divisions: 5,
-            onChanged: (value) {},
+            onChanged: (value) {
+              ref.read(inferenceFpsProvider.notifier).state = value.round();
+            },
           ),
 
           // Camera Section
@@ -65,16 +87,22 @@ class SettingsScreen extends ConsumerWidget {
             context,
             title: 'Mirror Front Camera',
             subtitle: 'Mirror preview for front camera',
-            value: true,
-            onChanged: (value) {},
+            value: mirrorFrontCamera,
+            onChanged: (value) {
+              ref.read(mirrorFrontCameraProvider.notifier).state = value;
+            },
           ),
           _buildDropdownTile(
             context,
             title: 'Default Camera',
             subtitle: 'Select default camera on startup',
-            value: 'rear',
+            value: defaultCamera,
             items: const ['front', 'rear'],
-            onChanged: (value) {},
+            onChanged: (value) {
+              if (value != null) {
+                ref.read(defaultCameraProvider.notifier).state = value;
+              }
+            },
           ),
 
           // Appearance Section
@@ -89,7 +117,7 @@ class SettingsScreen extends ConsumerWidget {
             context,
             title: 'Dark Mode',
             subtitle: 'Use dark theme',
-            value: false,
+            value: isDarkMode,
             onChanged: onThemeChanged,
           ),
 
@@ -106,21 +134,21 @@ class SettingsScreen extends ConsumerWidget {
             title: const Text('Registered Persons'),
             subtitle: const Text('View and manage registered persons'),
             trailing: const Icon(Icons.chevron_right),
-            onTap: () {},
+            onTap: () => context.go('/persons'),
           ),
           ListTile(
             leading: const Icon(Icons.delete_forever, color: Colors.red),
             title: const Text('Clear Face Database'),
             subtitle: const Text('Delete all face embeddings and person data'),
             textColor: Colors.red,
-            onTap: () => _showClearDatabaseDialog(context),
+            onTap: () => _showClearDatabaseDialog(context, ref),
           ),
           ListTile(
             leading: const Icon(Icons.restore, color: Colors.orange),
             title: const Text('Reset App'),
             subtitle: const Text('Reset all settings to defaults'),
             textColor: Colors.orange,
-            onTap: () => _showResetAppDialog(context),
+            onTap: () => _showResetAppDialog(context, ref),
           ),
 
           // Privacy Section
@@ -209,7 +237,7 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  void _showClearDatabaseDialog(BuildContext context) {
+  void _showClearDatabaseDialog(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -223,12 +251,25 @@ class SettingsScreen extends ConsumerWidget {
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context);
-              // TODO: Implement database clearing
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Database cleared')),
-              );
+              try {
+                final faceEmbeddingDao = ref.read(faceEmbeddingDaoProvider);
+                final personDao = ref.read(personDaoProvider);
+                await faceEmbeddingDao.deleteAllFaceEmbeddings();
+                await personDao.deleteAllPersons();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Database cleared')),
+                  );
+                }
+              } catch (e) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Failed to clear database: $e')),
+                  );
+                }
+              }
             },
             style: TextButton.styleFrom(foregroundColor: Colors.red),
             child: const Text('Delete'),
@@ -238,7 +279,7 @@ class SettingsScreen extends ConsumerWidget {
     );
   }
 
-  void _showResetAppDialog(BuildContext context) {
+  void _showResetAppDialog(BuildContext context, WidgetRef ref) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -254,7 +295,12 @@ class SettingsScreen extends ConsumerWidget {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              // TODO: Implement settings reset
+              // Reset all settings providers to defaults
+              ref.read(objectConfidenceThresholdProvider.notifier).state = 0.5;
+              ref.read(faceRecognitionThresholdProvider.notifier).state = 0.7;
+              ref.read(inferenceFpsProvider.notifier).state = 15;
+              ref.read(mirrorFrontCameraProvider.notifier).state = true;
+              ref.read(defaultCameraProvider.notifier).state = 'rear';
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('Settings reset to defaults')),
               );

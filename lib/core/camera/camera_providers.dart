@@ -46,3 +46,9 @@ final isFrontCameraProvider = Provider<bool>((ref) {
 
 /// Provider for frame skip interval (performance tuning)
 final frameSkipIntervalProvider = StateProvider<int>((ref) => 2);
+
+/// Provider for mirroring the front camera preview
+final mirrorFrontCameraProvider = StateProvider<bool>((ref) => true);
+
+/// Provider for the default camera on startup ('front' or 'rear')
+final defaultCameraProvider = StateProvider<String>((ref) => 'rear');

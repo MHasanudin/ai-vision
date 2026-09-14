@@ -138,8 +138,11 @@ class ObjectDetectionEngine extends DetectionEngine {
   static const int _maxDetections = 100;
   
   // Preprocessing
-  static const double _confidenceThreshold = 0.5;
   static const double _iouThreshold = 0.45;
+
+  /// Confidence threshold for filtering detections.
+  /// Can be updated at runtime (e.g. from settings).
+  double confidenceThreshold = 0.5;
 
   @override
   bool get isInitialized => _isInitialized;
@@ -291,7 +294,7 @@ class ObjectDetectionEngine extends DetectionEngine {
         }
       }
       
-      if (maxScore < _confidenceThreshold) continue;
+      if (maxScore < confidenceThreshold) continue;
       
       // Decode box (cx, cy, w, h) -> (x1, y1, x2, y2) normalized to input size
       final cx = output[0][i];
@@ -398,6 +401,9 @@ class HandDetectionEngine extends DetectionEngine {
   Interpreter? _interpreter;
   bool _isInitialized = false;
 
+  static const int _inputSize = 256;
+  static const int _numLandmarks = 21;
+
   @override
   bool get isInitialized => _isInitialized;
 
@@ -408,6 +414,7 @@ class HandDetectionEngine extends DetectionEngine {
     try {
       _interpreter = await Interpreter.fromAsset('assets/models/hand_landmark.tflite');
       _isInitialized = true;
+      debugPrint('HandDetectionEngine: Model loaded successfully');
     } catch (e) {
       _isInitialized = false;
       debugPrint('HandDetectionEngine: Model not found, using mock mode: $e');
@@ -421,15 +428,99 @@ class HandDetectionEngine extends DetectionEngine {
     }
 
     try {
-      // TODO: Implement actual hand landmark detection
-      // Preprocess: resize to 256x256, normalize
-      // Run inference
-      // Postprocess: extract 21 landmarks, calculate finger states
-      return _getMockResult();
+      final srcW = width ?? _inputSize;
+      final srcH = height ?? _inputSize;
+
+      // Preprocess: resize to 256x256, normalize to [0,1]
+      final input = _preprocessImage(imageData, srcW, srcH);
+
+      // Prepare outputs (ByteBuffers preserve tensor shape — flat lists get reshaped to 1D)
+      final landmarksOutput = Float32List(1 * 63).buffer; // [1, 63] = 21 landmarks * 3
+      final handflagOutput = Float32List(1).buffer; // [1, 1]
+      final handednessOutput = Float32List(1).buffer; // [1, 1]
+
+      final outputs = <int, Object>{
+        0: landmarksOutput,
+        1: handflagOutput,
+        2: handednessOutput,
+      };
+
+      _interpreter!.runForMultipleInputs([input.buffer], outputs);
+
+      final handflag = handflagOutput.asFloat32List();
+      final handedness = handednessOutput.asFloat32List();
+      final landmarksRaw = landmarksOutput.asFloat32List();
+
+      final handConfidence = handflag[0];
+      if (handConfidence < 0.5) {
+        return _getMockResult(); // No hand detected
+      }
+
+      // Parse landmarks
+      final landmarks = <Offset>[];
+      for (int i = 0; i < _numLandmarks; i++) {
+        final x = landmarksRaw[i * 3].clamp(0.0, 1.0);
+        final y = landmarksRaw[i * 3 + 1].clamp(0.0, 1.0);
+        landmarks.add(Offset(x, y));
+      }
+
+      // Determine finger states
+      final fingerStates = _calculateFingerStates(landmarks);
+      final fingerCount = fingerStates.where((s) => s).length;
+      final isLeftHand = handedness[0] > 0.5;
+
+      return HandDetectionResult(
+        fingerCount,
+        fingerStates,
+        landmarks: landmarks,
+        isLeftHand: isLeftHand,
+      );
     } catch (e) {
       debugPrint('HandDetectionEngine error: $e');
       return _getMockResult();
     }
+  }
+
+  List<bool> _calculateFingerStates(List<Offset> landmarks) {
+    if (landmarks.length < 21) return [false, false, false, false, false];
+
+    // Thumb: compare tip (4) to IP joint (3) x-position (wider hand = right hand rule)
+    final thumbOpen = (landmarks[4] - landmarks[3]).distance >
+        (landmarks[3] - landmarks[2]).distance * 0.5;
+
+    // Index: tip (8) above PIP (6)
+    final indexOpen = landmarks[8].dy < landmarks[6].dy;
+    // Middle: tip (12) above PIP (10)
+    final middleOpen = landmarks[12].dy < landmarks[10].dy;
+    // Ring: tip (16) above PIP (14)
+    final ringOpen = landmarks[16].dy < landmarks[14].dy;
+    // Pinky: tip (20) above PIP (18)
+    final pinkyOpen = landmarks[20].dy < landmarks[18].dy;
+
+    return [thumbOpen, indexOpen, middleOpen, ringOpen, pinkyOpen];
+  }
+
+  /// Resize and normalize RGB image data to [1, 256, 256, 3] float32
+  Float32List _preprocessImage(Uint8List rgbData, int srcWidth, int srcHeight) {
+    final input = Float32List(1 * _inputSize * _inputSize * 3);
+    final scaleX = srcWidth / _inputSize;
+    final scaleY = srcHeight / _inputSize;
+
+    for (int y = 0; y < _inputSize; y++) {
+      final srcY = (y * scaleY).round().clamp(0, srcHeight - 1);
+      for (int x = 0; x < _inputSize; x++) {
+        final srcX = (x * scaleX).round().clamp(0, srcWidth - 1);
+        final srcIdx = (srcY * srcWidth + srcX) * 3;
+        final dstIdx = (y * _inputSize + x) * 3;
+
+        if (srcIdx + 2 < rgbData.length && dstIdx + 2 < input.length) {
+          input[dstIdx] = rgbData[srcIdx] / 255.0;     // R
+          input[dstIdx + 1] = rgbData[srcIdx + 1] / 255.0; // G
+          input[dstIdx + 2] = rgbData[srcIdx + 2] / 255.0; // B
+        }
+      }
+    }
+    return input;
   }
 
   @override
@@ -449,10 +540,29 @@ class HandDetectionEngine extends DetectionEngine {
   }
 }
 
-/// Face Detection Engine using BlazeFace TFLite model
+/// Face Detection Engine using BlazeFace Short-Range TFLite model
+/// 
+/// Model specs (from MediaPipe source):
+/// Input:  [1, 128, 128, 3] float32 (0-1)
+/// Output: [1, 896, 16] regressors (4 box + 12 keypoints = 6 kp × 2)
+///         [1, 896, 1]  classificators (scores)
+/// Anchors: 4 layers, strides [8,16,16,16], 896 total
+/// Box decode: reverse_output_order, apply_exponential, sigmoid_score
 class FaceDetectionEngine extends DetectionEngine {
   Interpreter? _interpreter;
   bool _isInitialized = false;
+
+  static const int _inputSize = 128;
+  static const int _numBoxes = 896;
+  static const int _numCoords = 16;
+  static const double _scoreThreshold = 0.5;
+  static const double _nmsIouThreshold = 0.3;
+
+  // BlazeFace short-range anchor config
+  static const List<int> _strides = [8, 16, 16, 16];
+
+  // Pre-computed anchors
+  late List<List<double>> _anchors; // [896][4] = [x_center, y_center, w, h]
 
   @override
   bool get isInitialized => _isInitialized;
@@ -463,11 +573,36 @@ class FaceDetectionEngine extends DetectionEngine {
     
     try {
       _interpreter = await Interpreter.fromAsset('assets/models/blazeface.tflite');
+      _generateAnchors();
       _isInitialized = true;
+      debugPrint('FaceDetectionEngine: Model loaded successfully');
     } catch (e) {
       _isInitialized = false;
       debugPrint('FaceDetectionEngine: Model not found, using mock mode: $e');
     }
+  }
+
+  void _generateAnchors() {
+    _anchors = [];
+    for (int layerIdx = 0; layerIdx < _strides.length; layerIdx++) {
+      final stride = _strides[layerIdx];
+      final gridSize = (_inputSize / stride).ceil();
+      // final scale — not used since we use fixed_anchor_size
+
+      for (int y = 0; y < gridSize; y++) {
+        for (int x = 0; x < gridSize; x++) {
+          final cx = (x + 0.5) / gridSize;
+          final cy = (y + 0.5) / gridSize;
+
+          // First anchor: aspect_ratio=1.0, scale
+          _anchors.add([cx, cy, 1.0, 1.0]);
+
+          // Second anchor: interpolated scale with aspect_ratio=1.0
+          _anchors.add([cx, cy, 1.0, 1.0]); // fixed_anchor_size, so w=h=1.0
+        }
+      }
+    }
+    debugPrint('FaceDetectionEngine: Generated ${_anchors.length} anchors');
   }
 
   @override
@@ -477,15 +612,141 @@ class FaceDetectionEngine extends DetectionEngine {
     }
 
     try {
-      // TODO: Implement actual face detection
-      // Preprocess: resize to 128x128, normalize
-      // Run inference
-      // Postprocess: decode boxes and keypoints
-      return _getMockResult();
+      final srcW = width ?? _inputSize;
+      final srcH = height ?? _inputSize;
+
+      // Preprocess: resize to 128x128, normalize to [0,1]
+      final input = _preprocessImage(imageData, srcW, srcH);
+
+      // Prepare outputs (ByteBuffers preserve tensor shape — flat lists get reshaped to 1D)
+      final regressorsOutput = Float32List(1 * _numBoxes * _numCoords).buffer;
+      final classificatorsOutput = Float32List(1 * _numBoxes).buffer;
+
+      final outputs = <int, Object>{
+        0: regressorsOutput,
+        1: classificatorsOutput,
+      };
+
+      _interpreter!.runForMultipleInputs([input.buffer], outputs);
+
+      // Decode detections
+      final boxes = _decodeDetections(
+        regressorsOutput.asFloat32List(),
+        classificatorsOutput.asFloat32List(),
+      );
+
+      return FaceDetectionResult(boxes);
     } catch (e) {
-      debugPrint('FaceDetectionEngine error: $e');
+      debugPrint('FaceDetectionEngine inference error: $e');
       return _getMockResult();
     }
+  }
+
+  List<DetectionBox> _decodeDetections(
+    Float32List regressors,
+    Float32List scores,
+  ) {
+    final candidates = <DetectionBox>[];
+
+    for (int i = 0; i < _numBoxes; i++) {
+      // Apply sigmoid to score (sigmoid_score=true)
+      final rawScore = scores[i];
+      final clippedScore = rawScore.clamp(-100.0, 100.0);
+      final score = 1.0 / (1.0 + math.exp(-clippedScore));
+
+      if (score < _scoreThreshold) continue;
+
+      // Decode box: reverse_output_order means [x_center, y_center, w, h]
+      final anchor = _anchors[i];
+      final anchorXc = anchor[0];
+      final anchorYc = anchor[1];
+
+      // reverse_output_order=true: raw[0]=x, raw[1]=y, raw[2]=w, raw[3]=h
+      final rawX = regressors[i * _numCoords + 0];
+      final rawY = regressors[i * _numCoords + 1];
+      final rawW = regressors[i * _numCoords + 2];
+      final rawH = regressors[i * _numCoords + 3];
+
+      // Decode: x = raw/x_scale * anchor_w + anchor_xc
+      final cx = rawX / _inputSize + anchorXc; // anchor_w=1.0
+      final cy = rawY / _inputSize + anchorYc; // anchor_h=1.0
+      // Apply exponential for width/height (apply_exponential_on_box_size=true)
+      final w = math.exp(rawW / _inputSize); // anchor_w=1.0
+      final h = math.exp(rawH / _inputSize); // anchor_h=1.0
+
+      // Convert to (x1, y1, x2, y2) normalized to [0,1]
+      final x1 = (cx - w / 2).clamp(0.0, 1.0);
+      final y1 = (cy - h / 2).clamp(0.0, 1.0);
+      final x2 = (cx + w / 2).clamp(0.0, 1.0);
+      final y2 = (cy + h / 2).clamp(0.0, 1.0);
+
+      final rect = Rect.fromLTRB(x1, y1, x2, y2);
+      if (rect.width <= 0 || rect.height <= 0) continue;
+
+      candidates.add(DetectionBox(
+        rect: rect,
+        label: 'Face',
+        confidence: score,
+        classIndex: 0,
+      ));
+    }
+
+    // Apply NMS
+    return _applyNMS(candidates);
+  }
+
+  List<DetectionBox> _applyNMS(List<DetectionBox> boxes) {
+    if (boxes.isEmpty) return [];
+    boxes.sort((a, b) => b.confidence.compareTo(a.confidence));
+
+    final keep = <DetectionBox>[];
+    final active = List<DetectionBox>.from(boxes);
+
+    while (active.isNotEmpty) {
+      final best = active.removeAt(0);
+      keep.add(best);
+
+      active.removeWhere((box) => _calculateIoU(best.rect, box.rect) > _nmsIouThreshold);
+    }
+
+    return keep;
+  }
+
+  double _calculateIoU(Rect a, Rect b) {
+    final intersectLeft = math.max(a.left, b.left);
+    final intersectTop = math.max(a.top, b.top);
+    final intersectRight = math.min(a.right, b.right);
+    final intersectBottom = math.min(a.bottom, b.bottom);
+
+    if (intersectLeft >= intersectRight || intersectTop >= intersectBottom) return 0.0;
+
+    final intersectArea = (intersectRight - intersectLeft) * (intersectBottom - intersectTop);
+    final aArea = a.width * a.height;
+    final bArea = b.width * b.height;
+    return intersectArea / (aArea + bArea - intersectArea);
+  }
+
+  /// Resize and normalize RGB image data to [1, 128, 128, 3] float32
+  Float32List _preprocessImage(Uint8List rgbData, int srcWidth, int srcHeight) {
+    final input = Float32List(1 * _inputSize * _inputSize * 3);
+    final scaleX = srcWidth / _inputSize;
+    final scaleY = srcHeight / _inputSize;
+
+    for (int y = 0; y < _inputSize; y++) {
+      final srcY = (y * scaleY).round().clamp(0, srcHeight - 1);
+      for (int x = 0; x < _inputSize; x++) {
+        final srcX = (x * scaleX).round().clamp(0, srcWidth - 1);
+        final srcIdx = (srcY * srcWidth + srcX) * 3;
+        final dstIdx = (y * _inputSize + x) * 3;
+
+        if (srcIdx + 2 < rgbData.length && dstIdx + 2 < input.length) {
+          input[dstIdx] = rgbData[srcIdx] / 255.0;         // R
+          input[dstIdx + 1] = rgbData[srcIdx + 1] / 255.0; // G
+          input[dstIdx + 2] = rgbData[srcIdx + 2] / 255.0; // B
+        }
+      }
+    }
+    return input;
   }
 
   @override

@@ -21,4 +21,6 @@ class PersonDao extends DatabaseAccessor<AppDatabase> with _$PersonDaoMixin {
   Future<int> deletePerson(int id) async {
     return (delete(persons)..where((p) => p.id.equals(id))).go();
   }
+
+  Future<int> deleteAllPersons() => delete(persons).go();
 }
