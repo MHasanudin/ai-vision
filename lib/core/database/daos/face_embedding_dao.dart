@@ -1,11 +1,12 @@
 import 'package:drift/drift.dart';
+import 'package:ai_vision/core/database/app_database.dart';
 import 'package:ai_vision/core/database/tables/face_embeddings.dart';
 
 part 'face_embedding_dao.g.dart';
 
 @DriftAccessor(tables: [FaceEmbeddings])
 class FaceEmbeddingDao extends DatabaseAccessor<AppDatabase> with _$FaceEmbeddingDaoMixin {
-  FaceEmbeddingDao(AppDatabase db) : super(db);
+  FaceEmbeddingDao(super.db);
 
   Future<List<FaceEmbedding>> getAllFaceEmbeddings() => select(faceEmbeddings).get();
 
@@ -15,9 +16,11 @@ class FaceEmbeddingDao extends DatabaseAccessor<AppDatabase> with _$FaceEmbeddin
 
   Future<int> insertFaceEmbedding(FaceEmbedding embedding) => into(faceEmbeddings).insert(embedding);
 
-  Future<int> updateFaceEmbedding(FaceEmbedding embedding) => update(faceEmbeddings).replace(embedding);
+  Future<bool> updateFaceEmbedding(FaceEmbedding embedding) => update(faceEmbeddings).replace(embedding);
 
-  Future<int> deleteFaceEmbedding(int id) => delete(faceEmbeddings)..where((f) => f.id.equals(id)).go();
+  Future<int> deleteFaceEmbedding(int id) async {
+    return (delete(faceEmbeddings)..where((f) => f.id.equals(id))).go();
+  }
 
   // Get embeddings for a specific person
   Future<List<FaceEmbedding>> getEmbeddingsByPersonId(int personId) =>

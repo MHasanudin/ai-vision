@@ -5,20 +5,22 @@ import 'package:ai_vision/core/camera/camera_providers.dart';
 import 'package:ai_vision/core/ml/detection_engine.dart';
 import 'package:ai_vision/core/ml/ml_providers.dart';
 
-class FaceDetectionScreen extends ConsumerStatefulWidget {
-  const FaceDetectionScreen({super.key});
+class HandDetectionScreen extends ConsumerStatefulWidget {
+  const HandDetectionScreen({super.key});
 
   @override
-  ConsumerState<FaceDetectionScreen> createState() => _FaceDetectionScreenState();
+  ConsumerState<HandDetectionScreen> createState() => _HandDetectionScreenState();
 }
 
-class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
-  FaceDetectionResult? _latestResult;
+class _HandDetectionScreenState extends ConsumerState<HandDetectionScreen> {
+  HandDetectionResult? _latestResult;
   bool _isCameraReady = false;
   String? _errorMessage;
   int _fps = 0;
   int _frameCount = 0;
   DateTime _lastFpsUpdate = DateTime.now();
+
+  static const List<String> _fingerNames = ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky'];
 
   @override
   void initState() {
@@ -49,7 +51,7 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
 
   void _subscribeToFrames() {
     final cameraService = ref.read(cameraServiceProvider);
-    final engine = ref.read(faceDetectionEngineProvider);
+    final engine = ref.read(handDetectionEngineProvider);
     
     cameraService.frameStream.listen((frame) {
       _updateFps();
@@ -57,11 +59,11 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
       engine.detect(frame.data, width: frame.width, height: frame.height).then((result) {
         if (mounted) {
           setState(() {
-            _latestResult = result as FaceDetectionResult;
+            _latestResult = result as HandDetectionResult;
           });
         }
       }).catchError((e) {
-        debugPrint('Face detection error: $e');
+        debugPrint('Hand detection error: $e');
       });
     });
   }
@@ -94,7 +96,7 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Face Detection & Recognition'),
+        title: const Text('Hand Detection'),
         actions: [
           IconButton(
             icon: const Icon(Icons.cameraswitch),
@@ -139,7 +141,7 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
             children: [
               CameraPreviewWidget(
                 cameraService: cameraService,
-                child: _buildFaceOverlay(),
+                child: _buildHandOverlay(),
               ),
               Positioned(
                 top: 8,
@@ -159,17 +161,17 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
             ],
           ),
         ),
-        _buildFaceInfoPanel(),
+        _buildHandInfoPanel(),
       ],
     );
   }
 
-  Widget _buildFaceOverlay() {
+  Widget _buildHandOverlay() {
     final result = _latestResult;
-    if (result == null || result.boxes.isEmpty) {
+    if (result == null) {
       return const Center(
         child: Text(
-          'No face detected',
+          'No hand detected',
           style: TextStyle(color: Colors.white, fontSize: 16, shadows: [
             Shadow(blurRadius: 4, color: Colors.black),
           ]),
@@ -177,15 +179,19 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
       );
     }
 
-    return CustomPaint(
-      painter: _FaceBoxPainter(result.boxes),
-      child: const SizedBox.expand(),
-    );
+    // Draw hand landmarks if available
+    if (result.landmarks != null && result.landmarks!.isNotEmpty) {
+      return CustomPaint(
+        painter: _HandLandmarkPainter(result.landmarks!),
+        child: const SizedBox.expand(),
+      );
+    }
+
+    return const SizedBox.shrink();
   }
 
-  Widget _buildFaceInfoPanel() {
+  Widget _buildHandInfoPanel() {
     final result = _latestResult;
-    final faceCount = result?.boxes.length ?? 0;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -195,96 +201,105 @@ class _FaceDetectionScreenState extends ConsumerState<FaceDetectionScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            faceCount > 0 ? '$faceCount face(s) detected' : 'No face detected',
-            style: Theme.of(context).textTheme.titleMedium,
+            result != null ? '${result.fingerCount} Finger${result.fingerCount != 1 ? 's' : ''}' : 'No hand detected',
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
           ),
           const SizedBox(height: 8),
-          if (result != null && result.boxes.isNotEmpty)
-            ...result.boxes.map((box) => Padding(
+          if (result != null)
+            ...List.generate(5, (i) => Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Row(
                     children: [
                       Expanded(
                         child: Text(
-                          box.label,
+                          _fingerNames[i],
                           style: Theme.of(context).textTheme.bodyLarge,
                         ),
                       ),
                       Text(
-                        '${(box.confidence * 100).toStringAsFixed(1)}%',
+                        result.fingerStates[i] ? 'OPEN' : 'CLOSED',
                         style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                              color: Theme.of(context).colorScheme.primary,
+                              color: result.fingerStates[i]
+                                  ? Colors.green
+                                  : Colors.red,
                               fontWeight: FontWeight.bold,
                             ),
                       ),
                     ],
                   ),
                 )),
+          const SizedBox(height: 8),
+          if (result != null)
+            Text(
+              'Total: ${result.fingerCount}',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
         ],
       ),
     );
   }
 }
 
-/// Custom painter for face bounding boxes
-class _FaceBoxPainter extends CustomPainter {
-  final List<DetectionBox> boxes;
+/// Custom painter for hand landmarks
+class _HandLandmarkPainter extends CustomPainter {
+  final List<Offset> landmarks;
 
-  _FaceBoxPainter(this.boxes);
+  _HandLandmarkPainter(this.landmarks);
 
   @override
   void paint(Canvas canvas, Size size) {
-    for (final box in boxes) {
-      final rect = Rect.fromLTRB(
-        box.rect.left * size.width,
-        box.rect.top * size.height,
-        box.rect.right * size.width,
-        box.rect.bottom * size.height,
-      );
+    // Draw connections between landmarks (simplified hand skeleton)
+    final connections = [
+      // Thumb
+      (0, 1), (1, 2), (2, 3), (3, 4),
+      // Index
+      (0, 5), (5, 6), (6, 7), (7, 8),
+      // Middle
+      (5, 9), (9, 10), (10, 11), (11, 12),
+      // Ring
+      (9, 13), (13, 14), (14, 15), (15, 16),
+      // Pinky
+      (13, 17), (17, 18), (18, 19), (19, 20),
+      // Palm
+      (0, 17),
+    ];
 
-      // Draw face bounding box
-      final paint = Paint()
-        ..color = Colors.cyan
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3;
+    final linePaint = Paint()
+      ..color = Colors.green
+      ..strokeWidth = 2
+      ..style = PaintingStyle.stroke;
 
-      canvas.drawRect(rect, paint);
+    final pointPaint = Paint()
+      ..color = Colors.cyan
+      ..strokeWidth = 4
+      ..style = PaintingStyle.fill;
 
-      // Draw label
-      final label = '${box.label} ${(box.confidence * 100).toStringAsFixed(1)}%';
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+    // Draw connections
+    for (final (start, end) in connections) {
+      if (start < landmarks.length && end < landmarks.length) {
+        canvas.drawLine(
+          Offset(landmarks[start].dx * size.width, landmarks[start].dy * size.height),
+          Offset(landmarks[end].dx * size.width, landmarks[end].dy * size.height),
+          linePaint,
+        );
+      }
+    }
 
-      final labelRect = Rect.fromLTWH(
-        rect.left,
-        rect.top - textPainter.height,
-        textPainter.width + 8,
-        textPainter.height,
-      );
-
-      final adjustedRect = labelRect.top < 0
-          ? Rect.fromLTWH(rect.left, rect.top, textPainter.width + 8, textPainter.height)
-          : labelRect;
-
-      canvas.drawRect(adjustedRect, Paint()..color = Colors.cyan);
-      textPainter.paint(
-        canvas,
-        Offset(adjustedRect.left + 4, adjustedRect.top),
+    // Draw landmark points
+    for (final landmark in landmarks) {
+      canvas.drawCircle(
+        Offset(landmark.dx * size.width, landmark.dy * size.height),
+        4,
+        pointPaint,
       );
     }
   }
 
   @override
-  bool shouldRepaint(covariant _FaceBoxPainter oldDelegate) {
-    return oldDelegate.boxes != boxes;
+  bool shouldRepaint(covariant _HandLandmarkPainter oldDelegate) {
+    return oldDelegate.landmarks != landmarks;
   }
 }

@@ -12,7 +12,7 @@ class HomeScreen extends ConsumerWidget {
         title: const Text('AI Vision'),
         centerTitle: true,
       ),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -59,7 +59,7 @@ class HomeScreen extends ConsumerWidget {
               description: 'Count fingers & gestures',
               onTap: () => context.go('/hands'),
             ),
-            const Spacer(),
+            const SizedBox(height: 32),
             Align(
               alignment: Alignment.bottomCenter,
               child: IconButton(
@@ -108,8 +108,9 @@ class HomeScreen extends ConsumerWidget {
               const SizedBox(height: 8),
               Text(
                 description,
-                style: Theme.of(context).textTheme.bodyMedium,
-                color: Colors.grey[600],
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Colors.grey[600],
+                ),
                 textAlign: TextAlign.center,
               ),
             ],
